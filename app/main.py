@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.db.database import connect_to_mongo, close_mongo_connection
 from app.routes import auth_routes
@@ -23,6 +24,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Heart Disease Prediction API",
     lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Routes
