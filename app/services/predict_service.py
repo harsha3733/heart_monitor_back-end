@@ -63,7 +63,7 @@ async def predict_heart_disease(email: str):
     # ✅ Get dynamic data (last 10 records)
     sensor_records = await db.sensor_data.find(
         {"email": email}
-    ).sort("timestamp", -1).limit(10).to_list(length=10)
+    ).sort("timestamp", -1).limit(30).to_list(length=30)
 
     agg = aggregate_sensor_data(sensor_records)
 

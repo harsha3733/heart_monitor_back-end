@@ -26,6 +26,14 @@ async def get_profile(email: str):
 
     if profile:
         profile.pop("_id")
+
+        # Also fetch user personal info and merge so frontend gets phone etc.
+        user = await db.users.find_one({"email": email})
+        if user:
+            profile["first_name"] = user.get("first_name", "")
+            profile["last_name"]  = user.get("last_name", "")
+            profile["phone"]      = user.get("phone", "")
+
         return {
             "type": "health",
             "data": profile
