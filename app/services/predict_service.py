@@ -87,17 +87,28 @@ def aggregate_sensor_data(records):
 def clinical_risk_score(profile, agg):
     score = 0.0
 
-    if profile["age"] > 55:             score += 0.15
-    if profile["age"] > 65:             score += 0.10  # extra for elderly
-    if profile["systolic_bp"] > 140:    score += 0.20
-    if profile["systolic_bp"] > 160:    score += 0.10  # extra for stage 2
-    if profile["diabetes"] == 1:        score += 0.15
-    if profile.get("smoking", 0) >= 1:  score += 0.10
-    if profile["cholesterol"] > 240:    score += 0.10
-    if profile["bmi"] > 30:             score += 0.05
-    if agg["heart_rate"] > 90:          score += 0.08
-    if agg["hrv"] < 40:                 score += 0.10
-    if agg["spo2"] < 95:                score += 0.10
+    if profile["age"] > 55:
+        score += 0.15
+    if profile["age"] > 65:
+        score += 0.10  # extra for elderly
+    if profile["systolic_bp"] > 140:
+        score += 0.20
+    if profile["systolic_bp"] > 160:
+        score += 0.10  # extra for stage 2
+    if profile["diabetes"] == 1:
+        score += 0.15
+    if profile.get("smoking", 0) >= 1:
+        score += 0.10
+    if profile["cholesterol"] > 240:
+        score += 0.10
+    if profile["bmi"] > 30:
+        score += 0.05
+    if agg["heart_rate"] > 90:
+        score += 0.08
+    if agg["hrv"] < 40:
+        score += 0.10
+    if agg["spo2"] < 95:
+        score += 0.10
 
     return min(score, 1.0)
 
