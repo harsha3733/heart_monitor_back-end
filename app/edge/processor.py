@@ -4,24 +4,18 @@ from app.edge.anomaly import detect_anomalies
 
 def process_sensor_data(data: dict):
     """
-    Full edge pipeline:
-    - Filtering
-    - Feature engineering
+    Edge pipeline:
+    - Filter noise / clamp to physiological ranges
     - Anomaly detection
+    Note: pulse_pressure is derived from PROFILE (systolic_bp - diastolic_bp)
+    inside predict_service, not here — sensor data doesn't carry BP readings.
     """
 
-    # 🔹 1. Filter noise
+    # 1. Filter noise
     data = filter_noise(data)
 
-    # 🔹 2. Derived features
-    systolic = data.get("systolic_bp", 120)
-    diastolic = data.get("diastolic_bp", 80)
-
-    data["pulse_pressure"] = systolic - diastolic
-
-    # 🔹 3. Detect anomalies
+    # 2. Detect anomalies
     alerts = detect_anomalies(data)
-
     data["alerts"] = alerts
 
     return data
