@@ -3,152 +3,202 @@ import numpy as np
 from app.db.database import get_db
 import os
 
-# 🔥 Get base directory (Backend/app/services/)
+# ── Path setup ───────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# 🔥 Move to Backend/
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
-
-# 🔥 Model folder path
 MODEL_DIR = os.path.join(ROOT_DIR, "Model")
 
-# ✅ Load models
+# ── Load models ──────────────────────────────────────────────────
 with open(os.path.join(MODEL_DIR, "scaler.pkl"), "rb") as f:
     scaler = pickle.load(f)
 
 with open(os.path.join(MODEL_DIR, "xgb_model.pkl"), "rb") as f:
-    xgb_model = pickle.load(f)
+    hgb_model = pickle.load(f)
 
 with open(os.path.join(MODEL_DIR, "mlp_model.pkl"), "rb") as f:
     mlp_model = pickle.load(f)
 
+# ── Feature order — MUST match training exactly ──────────────────
+FEATURE_ORDER = [
+    "age", "sex", "smoking", "diabetes",
+    "systolic_bp", "diastolic_bp", "pulse_pressure",
+    "cholesterol", "bmi", "alcohol",
+    "heart_rate", "hrv", "spo2", "temperature",
+    "step_count", "activity_level",
+]
 
-# 🔹 Aggregate sensor data
+# ── Training data hard limits (model breaks outside these) ───────
+# If sensor sends HRV=500 the MLP collapses to 0.0 and kills the prediction
+CLAMP = {
+    "age":           (18,   90),
+    "systolic_bp":   (80,  220),
+    "diastolic_bp":  (50,  130),
+    "pulse_pressure":(10,  100),
+    "cholesterol":   (100, 400),
+    "bmi":           (15,   55),
+    "heart_rate":    (45,  130),
+    "hrv":           (10,  140),  # raw RR intervals (500+) are NOT HRV — clamp hard
+    "spo2":          (88,  100),
+    "temperature":   (35,   39),
+    "step_count":    (0,  15000),
+}
+
+
+def clamp(value, feature):
+    lo, hi = CLAMP[feature]
+    return max(lo, min(float(value), hi))
+
+
+# ── HRV unit conversion ──────────────────────────────────────────
+# Many sensors send raw RR interval (ms between beats, ~600-1000ms)
+# instead of RMSSD HRV (10-140ms). Detect and convert.
+def normalize_hrv(raw_hrv: float) -> float:
+    if raw_hrv > 140:
+        # Likely a raw RR interval — estimate RMSSD as ~10% of RR
+        estimated_hrv = raw_hrv * 0.10
+        return clamp(estimated_hrv, "hrv")
+    return clamp(raw_hrv, "hrv")
+
+
+# ── Aggregate the last 30 sensor records ─────────────────────────
 def aggregate_sensor_data(records):
     if not records:
         return {
-            "heart_rate": 75,
-            "hrv": 50,
-            "spo2": 98,
-            "temperature": 36.5,
+            "heart_rate": 75.0,
+            "hrv": 60.0,
+            "spo2": 98.0,
+            "temperature": 36.6,
             "step_count": 5000,
-            "temp_change": 0
         }
 
-    heart_rates = [r["heart_rate"] for r in records]
-    hrvs = [r["hrv"] for r in records]
-    spo2s = [r["spo2"] for r in records]
-    temps = [r["temperature"] for r in records]
-    steps = [r["steps"] for r in records]
-
     return {
-        "heart_rate": sum(heart_rates) / len(heart_rates),
-        "hrv": sum(hrvs) / len(hrvs),
-        "spo2": sum(spo2s) / len(spo2s),
-        "temperature": sum(temps) / len(temps),
-        "step_count": sum(steps),
-        "temp_change": temps[-1] - temps[0] if len(temps) > 1 else 0
+        "heart_rate": sum(r["heart_rate"] for r in records) / len(records),
+        "hrv":        sum(r["hrv"]        for r in records) / len(records),
+        "spo2":       sum(r["spo2"]       for r in records) / len(records),
+        "temperature":sum(r["temperature"]for r in records) / len(records),
+        "step_count": sum(r["steps"]      for r in records),
     }
 
 
+# ── Clinical rule-based score ────────────────────────────────────
+# Runs independently alongside the ML model.
+# Ensures high-risk clinical profiles are never ignored
+# even if sensor data is ambiguous or out of range.
+def clinical_risk_score(profile, agg):
+    score = 0.0
+
+    if profile["age"] > 55:             score += 0.15
+    if profile["age"] > 65:             score += 0.10  # extra for elderly
+    if profile["systolic_bp"] > 140:    score += 0.20
+    if profile["systolic_bp"] > 160:    score += 0.10  # extra for stage 2
+    if profile["diabetes"] == 1:        score += 0.15
+    if profile.get("smoking", 0) >= 1:  score += 0.10
+    if profile["cholesterol"] > 240:    score += 0.10
+    if profile["bmi"] > 30:             score += 0.05
+    if agg["heart_rate"] > 90:          score += 0.08
+    if agg["hrv"] < 40:                 score += 0.10
+    if agg["spo2"] < 95:                score += 0.10
+
+    return min(score, 1.0)
+
+
+# ── Main prediction function ─────────────────────────────────────
 async def predict_heart_disease(email: str):
     db = get_db()
 
-    # ✅ Get static data
+    # 1. Static profile data
     profile = await db.profiles.find_one({"email": email})
     if not profile:
         return None
     profile.pop("_id")
 
-    # ✅ Get dynamic data (last 10 records)
+    # 2. Last 30 sensor readings
     sensor_records = await db.sensor_data.find(
         {"email": email}
     ).sort("timestamp", -1).limit(30).to_list(length=30)
 
     agg = aggregate_sensor_data(sensor_records)
 
-    # ✅ Derived feature
-    pulse_pressure = profile["systolic_bp"] - profile["diastolic_bp"]
+    # 3. Normalize HRV — convert raw RR interval to RMSSD if needed
+    agg["hrv"] = normalize_hrv(agg["hrv"])
 
-    # ✅ Activity level from steps
-    if agg["step_count"] < 3000:
+    # 4. Clamp all values to training ranges
+    heart_rate   = clamp(agg["heart_rate"],        "heart_rate")
+    hrv          = clamp(agg["hrv"],               "hrv")
+    spo2         = clamp(agg["spo2"],              "spo2")
+    temperature  = clamp(agg["temperature"],       "temperature")
+    step_count   = clamp(agg["step_count"],        "step_count")
+    age          = clamp(profile["age"],            "age")
+    systolic_bp  = clamp(profile["systolic_bp"],    "systolic_bp")
+    diastolic_bp = clamp(profile["diastolic_bp"],   "diastolic_bp")
+    cholesterol  = clamp(profile["cholesterol"],    "cholesterol")
+    bmi          = clamp(profile["bmi"],            "bmi")
+    pulse_pressure = clamp(systolic_bp - diastolic_bp, "pulse_pressure")
+
+    # 5. Normalize smoking/alcohol: profile allows 0/1/2, model trained on 0/1
+    smoking = 1 if profile.get("smoking", 0) >= 1 else 0
+    alcohol  = 1 if profile.get("alcohol",  0) >= 1 else 0
+
+    # 6. Activity level from clamped step count
+    if step_count < 3000:
         activity_level = 0
-    elif agg["step_count"] < 7000:
+    elif step_count < 7000:
         activity_level = 1
     else:
         activity_level = 2
 
-    # ✅ FINAL FEATURE VECTOR (MATCH TRAINING ORDER)
+    # 7. Build feature vector
     features = [
-        profile["age"],
-        profile["sex"],
-        profile["smoking"],
-        profile["diabetes"],
-        profile["systolic_bp"],
-        profile["diastolic_bp"],
-        pulse_pressure,
-        profile["cholesterol"],
-        profile["bmi"],
-        profile["alcohol"],
-        agg["heart_rate"],
-        agg["hrv"],
-        agg["spo2"],
-        agg["temperature"],
-        agg["temp_change"],
-        activity_level,
-        agg["step_count"]
+        age, profile["sex"], smoking, profile["diabetes"],
+        systolic_bp, diastolic_bp, pulse_pressure,
+        cholesterol, bmi, alcohol,
+        heart_rate, hrv, spo2, temperature,
+        step_count, activity_level,
     ]
 
-    input_array = np.array([features])
+    # 8. Scale and predict
+    input_scaled = scaler.transform(np.array([features]))
 
-    # ✅ Scale
-    input_scaled = scaler.transform(input_array)
+    hgb_prob = hgb_model.predict_proba(input_scaled)[0][1]
+    mlp_prob = mlp_model.predict_proba(input_scaled)[0][1]
+    model_prob = 0.6 * hgb_prob + 0.4 * mlp_prob
 
-    # =========================
-    # 🔹 XGBoost
-    # =========================
-    xgb_pred = xgb_model.predict(input_scaled)[0]
-    xgb_prob = (
-        xgb_model.predict_proba(input_scaled)[0][1]
-        if hasattr(xgb_model, "predict_proba")
-        else None
-    )
+    # 9. Clinical rule-based score (parallel to model)
+    agg_normalized = {**agg, "heart_rate": heart_rate, "hrv": hrv, "spo2": spo2}
+    clinical_prob = clinical_risk_score(profile, agg_normalized)
 
-    # =========================
-    # 🔹 MLP
-    # =========================
-    mlp_pred = mlp_model.predict(input_scaled)[0]
-    mlp_prob = (
-        mlp_model.predict_proba(input_scaled)[0][1]
-        if hasattr(mlp_model, "predict_proba")
-        else None
-    )
-
-    # =========================
-    # 🔥 ENSEMBLE
-    # =========================
-    probs = [p for p in [xgb_prob, mlp_prob] if p is not None]
-
-    if probs:
-        final_prob = sum(probs) / len(probs)
-    else:
-        final_prob = (xgb_pred + mlp_pred) / 2
-
+    # 10. Final hybrid probability — 50% model + 50% clinical rules
+    final_prob = 0.5 * model_prob + 0.5 * clinical_prob
     final_pred = 1 if final_prob >= 0.5 else 0
+
+    # 11. Risk tier
+    if final_prob >= 0.65:
+        risk_level = "High"
+    elif final_prob >= 0.35:
+        risk_level = "Moderate"
+    else:
+        risk_level = "Low"
 
     return {
         "prediction": int(final_pred),
-        "risk": "High" if final_pred == 1 else "Low",
-        "probability": float(final_prob),
+        "risk": risk_level,
+        "probability": round(float(final_prob), 4),
 
         "model_outputs": {
-            "xgb": {
-                "prediction": int(xgb_pred),
-                "probability": float(xgb_prob) if xgb_prob else None
-            },
-            "mlp": {
-                "prediction": int(mlp_pred),
-                "probability": float(mlp_prob) if mlp_prob else None
-            }
-        }
+            "hgb":             {"probability": round(float(hgb_prob), 4)},
+            "mlp":             {"probability": round(float(mlp_prob), 4)},
+            "model_ensemble":  round(float(model_prob), 4),
+            "clinical_score":  round(float(clinical_prob), 4),
+        },
+
+        "input_summary": {
+            "heart_rate":     round(heart_rate, 1),
+            "hrv":            round(hrv, 1),
+            "hrv_raw":        round(agg["hrv"], 1),
+            "spo2":           round(spo2, 1),
+            "temperature":    round(temperature, 1),
+            "step_count":     int(step_count),
+            "activity_level": activity_level,
+            "pulse_pressure": int(pulse_pressure),
+        },
     }
