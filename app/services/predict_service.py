@@ -86,29 +86,58 @@ def aggregate_sensor_data(records):
 # even if sensor data is ambiguous or out of range.
 def clinical_risk_score(profile, agg):
     score = 0.0
+    age = profile["age"]
+    sbp = profile["systolic_bp"]
 
-    if profile["age"] > 55:
-        score += 0.15
-    if profile["age"] > 65:
-        score += 0.10  # extra for elderly
-    if profile["systolic_bp"] > 140:
+    # Age — biggest factor
+    if age >= 65:
+        score += 0.30
+    elif age >= 55:
         score += 0.20
-    if profile["systolic_bp"] > 160:
-        score += 0.10  # extra for stage 2
-    if profile["diabetes"] == 1:
-        score += 0.15
-    if profile.get("smoking", 0) >= 1:
-        score += 0.10
-    if profile["cholesterol"] > 240:
-        score += 0.10
-    if profile["bmi"] > 30:
+    elif age >= 45:
+        score += 0.12
+    elif age >= 35:
         score += 0.05
-    if agg["heart_rate"] > 90:
+
+    # Blood pressure — second biggest
+    if sbp >= 160:
+        score += 0.25
+    elif sbp >= 140:
+        score += 0.18
+    elif sbp >= 130:
         score += 0.08
-    if agg["hrv"] < 40:
-        score += 0.10
+
+    # Diabetes — strong independent risk
+    if profile["diabetes"] == 1:
+        score += 0.20
+
+    # Smoking
+    if profile.get("smoking", 0) >= 1:
+        score += 0.14
+
+    # Cholesterol
+    if profile["cholesterol"] >= 280:
+        score += 0.12
+    elif profile["cholesterol"] >= 240:
+        score += 0.08
+
+    # BMI
+    if profile["bmi"] >= 35:
+        score += 0.08
+    elif profile["bmi"] >= 30:
+        score += 0.04
+
+    # Male sex
+    if profile["sex"] == 1:
+        score += 0.04
+
+    # Wearable adjustments — secondary signal only
+    if agg["heart_rate"] > 90:
+        score += 0.06
+    if agg["hrv"] < 35:
+        score += 0.08
     if agg["spo2"] < 95:
-        score += 0.10
+        score += 0.06
 
     return min(score, 1.0)
 
@@ -179,17 +208,17 @@ async def predict_heart_disease(email: str):
     clinical_prob = clinical_risk_score(profile, agg_normalized)
 
     # 10. Final hybrid probability — 50% model + 50% clinical rules
-    final_prob = 0.5 * model_prob + 0.5 * clinical_prob
-    final_pred = 1 if final_prob >= 0.5 else 0
+    final_prob = 0.40 * model_prob + 0.60 * clinical_prob
 
-    # 11. Risk tier
-    if final_prob >= 0.65:
+    # ── Risk thresholds ──────────────────────────────────────
+    if final_prob >= 0.60:
         risk_level = "High"
-    elif final_prob >= 0.35:
+    elif final_prob >= 0.30:
         risk_level = "Moderate"
     else:
         risk_level = "Low"
 
+    final_pred = 1 if final_prob >= 0.5 else 0
     return {
         "prediction": int(final_pred),
         "risk": risk_level,
