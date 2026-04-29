@@ -39,5 +39,9 @@ async def login_user(user):
 
     return {
         "access_token": token,
+        "user":{
+            "first_name": existing["first_name"],
+            "last_name": existing["last_name"]
+        },
         "token_type": "bearer"
     }
